@@ -1,0 +1,148 @@
+using BCrypt.Net;
+using Microsoft.IdentityModel.Tokens;
+using System.IdentityModel.Tokens.Jwt;
+using System.Security.Claims;
+using System.Text;
+using TimeTrack.API.DTOs.Auth;
+using TimeTrack.API.Models;
+using TimeTrack.API.Repository.IRepository;
+
+namespace TimeTrack.API.Service;
+
+public class AuthenticationService : IAuthenticationService
+{
+    private readonly IUnitOfWork _unitOfWork;
+    private readonly IConfiguration _configuration;
+
+    public AuthenticationService(IUnitOfWork unitOfWork, IConfiguration configuration)
+    {
+        _unitOfWork = unitOfWork;
+        _configuration = configuration;
+    }
+
+    public async Task<LoginResponseDto> LoginAsync(LoginRequestDto request)
+    {
+        var user = await _unitOfWork.Users.GetByEmailAsync(request.Email);
+
+        if (user == null || !BCrypt.Net.BCrypt.Verify(request.Password, user.PasswordHash))
+        {
+            throw new UnauthorizedAccessException("Invalid email or password");
+        }
+
+        if (user.Status != "Active")
+        {
+            throw new UnauthorizedAccessException("User account is inactive");
+        }
+
+        user.LastLoginDate = DateTime.UtcNow;
+        _unitOfWork.Users.Update(user);
+        await _unitOfWork.SaveChangesAsync();
+
+        var token = GenerateJwtToken(user.UserId, user.Email, user.Role);
+        var expirationMinutes = int.Parse(_configuration["JwtSettings:ExpirationMinutes"] ?? "480");
+
+        return new LoginResponseDto
+        {
+            UserId = user.UserId,
+            Name = user.Name,
+            Email = user.Email,
+            Role = user.Role,
+            Department = user.Department,
+            Token = token,
+            TokenExpiration = DateTime.UtcNow.AddMinutes(expirationMinutes)
+        };
+    }
+
+    public async Task<LoginResponseDto> RegisterAsync(RegisterRequestDto request)
+    {
+        // Validate department and role
+        request.Validate();
+
+        if (await _unitOfWork.Users.EmailExistsAsync(request.Email))
+        {
+            throw new InvalidOperationException("Email already registered");
+        }
+
+        var user = new UserEntity
+        {
+            Name = request.Name,
+            Email = request.Email,
+            PasswordHash = BCrypt.Net.BCrypt.HashPassword(request.Password),
+            Role = request.Role,
+            Department = request.Department,
+            Status = "Active",
+            CreatedDate = DateTime.UtcNow
+        };
+
+        await _unitOfWork.Users.AddAsync(user);
+        await _unitOfWork.SaveChangesAsync();
+
+        var token = GenerateJwtToken(user.UserId, user.Email, user.Role);
+        var expirationMinutes = int.Parse(_configuration["JwtSettings:ExpirationMinutes"] ?? "480");
+
+        return new LoginResponseDto
+        {
+            UserId = user.UserId,
+            Name = user.Name,
+            Email = user.Email,
+            Role = user.Role,
+            Department = user.Department,
+            Token = token,
+            TokenExpiration = DateTime.UtcNow.AddMinutes(expirationMinutes)
+        };
+    }
+
+    public async Task<bool> ValidateTokenAsync(string token)
+    {
+        if (string.IsNullOrEmpty(token))
+            return false;
+
+        var tokenHandler = new JwtSecurityTokenHandler();
+        var key = Encoding.ASCII.GetBytes(_configuration["JwtSettings:SecretKey"] ?? "");
+
+        try
+        {
+            tokenHandler.ValidateToken(token, new TokenValidationParameters
+            {
+                ValidateIssuerSigningKey = true,
+                IssuerSigningKey = new SymmetricSecurityKey(key),
+                ValidateIssuer = true,
+                ValidateAudience = true,
+                ValidIssuer = _configuration["JwtSettings:Issuer"],
+                ValidAudience = _configuration["JwtSettings:Audience"],
+                ClockSkew = TimeSpan.Zero
+            }, out SecurityToken validatedToken);
+
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    public string GenerateJwtToken(int userId, string email, string role)
+    {
+        var tokenHandler = new JwtSecurityTokenHandler();
+        var key = Encoding.ASCII.GetBytes(_configuration["JwtSettings:SecretKey"] ?? "");
+        var expirationMinutes = int.Parse(_configuration["JwtSettings:ExpirationMinutes"] ?? "480");
+
+        var tokenDescriptor = new SecurityTokenDescriptor
+        {
+            Subject = new ClaimsIdentity(new[]
+            {
+                new Claim(ClaimTypes.NameIdentifier, userId.ToString()),
+                new Claim(ClaimTypes.Email, email),
+                new Claim(ClaimTypes.Role, role),
+                new Claim(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString())
+            }),
+            Expires = DateTime.UtcNow.AddMinutes(expirationMinutes),
+            Issuer = _configuration["JwtSettings:Issuer"],
+            Audience = _configuration["JwtSettings:Audience"],
+            SigningCredentials = new SigningCredentials(new SymmetricSecurityKey(key), SecurityAlgorithms.HmacSha256Signature)
+        };
+
+        var token = tokenHandler.CreateToken(tokenDescriptor);
+        return tokenHandler.WriteToken(token);
+    }
+}
