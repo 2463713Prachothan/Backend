@@ -45,12 +45,13 @@ builder.Services.AddScoped<INotificationService, NotificationService>();
 builder.Services.AddScoped<IRegistrationService, RegistrationService>();
 builder.Services.AddScoped<IBreakService, BreakService>();
 builder.Services.AddScoped<IAnalyticsService, AnalyticsService>();
+builder.Services.AddScoped<IProductivityService, ProductivityService>();
 
 // Memory cache for caching productivity per-user
 builder.Services.AddMemoryCache();
 
-// Register productivity service
-builder.Services.AddScoped<IProductivityService, ProductivityService>();
+//// Register productivity service
+//builder.Services.AddScoped<IProductivityService, ProductivityService>();
 
 // JWT
 var jwtKey = builder.Configuration["JwtSettings:SecretKey"];
